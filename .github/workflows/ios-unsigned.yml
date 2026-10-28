@@ -1,106 +1,159 @@
-name: Build unsigned iOS IPA
+
+name: Build Unsigned iOS IPA
 
 on:
   workflow_dispatch:
+  push:
+    paths:
+      - "**.zip"
+      - ".github/workflows/ios-unsigned.yml"
 
 permissions:
   contents: read
 
 jobs:
   build:
-    name: Build Godot iOS IPA
     runs-on: macos-14
-    timeout-minutes: 90
+    timeout-minutes: 60
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Find and extract project ZIP
+      - name: Find and extract Godot project ZIP
         shell: bash
         run: |
           set -euo pipefail
 
-          ZIP_FILE="$(find "$GITHUB_WORKSPACE" -maxdepth 3 -type f -iname '*.zip' ! -path '*/.git/*' | head -n 1 || true)"
+          mkdir -p "$GITHUB_WORKSPACE/extracted"
+
+          ZIP_FILE="$(find "$GITHUB_WORKSPACE" \
+            -maxdepth 3 -type f -iname '*.zip' \
+            ! -path '*/extracted/*' \
+            | head -n 1 || true)"
 
           if [[ -z "$ZIP_FILE" ]]; then
-            echo "::error::没有找到项目 ZIP，请先上传 velocity_godot_phase1(1).zip"
+            echo "::error::仓库里没有找到项目 ZIP，请先上传 ZIP 文件。"
             exit 1
           fi
 
-          mkdir -p "$RUNNER_TEMP/project_src"
-          unzip -q "$ZIP_FILE" -d "$RUNNER_TEMP/project_src"
+          echo "找到 ZIP：$ZIP_FILE"
+          ditto -x -k "$ZIP_FILE" "$GITHUB_WORKSPACE/extracted"
 
-          PROJECT_FILE="$(find "$RUNNER_TEMP/project_src" -name project.godot -type f | head -n 1 || true)"
+          PROJECT_FILE="$(find "$GITHUB_WORKSPACE/extracted" \
+            -type f -name project.godot \
+            -not -path '*/.godot/*' \
+            | head -n 1 || true)"
 
           if [[ -z "$PROJECT_FILE" ]]; then
-            echo "::error::ZIP 内没有找到 project.godot"
+            echo "::error::ZIP 中没有找到 project.godot，不是可识别的 Godot 项目。"
             exit 1
           fi
 
           PROJECT_DIR="$(dirname "$PROJECT_FILE")"
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
-
-          echo "项目目录：$PROJECT_DIR"
-          ls -la "$PROJECT_DIR"
+          echo "Godot 项目目录：$PROJECT_DIR"
 
       - name: Install Godot 4.3
         shell: bash
         run: |
           set -euo pipefail
 
-          mkdir -p "$RUNNER_TEMP/godot"
+          cd "$RUNNER_TEMP"
 
           curl -fL --retry 3 \
             "https://github.com/godotengine/godot/releases/download/4.3-stable/Godot_v4.3-stable_macos.universal.zip" \
-            -o "$RUNNER_TEMP/godot/godot.zip"
+            -o godot.zip
 
-          unzip -q "$RUNNER_TEMP/godot/godot.zip" \
-            -d "$RUNNER_TEMP/godot/unpacked"
+          unzip -oq godot.zip -d godot-bin
 
-          GODOT_BIN="$(find "$RUNNER_TEMP/godot/unpacked" -type f -path '*/Contents/MacOS/Godot' | head -n 1 || true)"
+          GODOT_BIN="$(find "$RUNNER_TEMP/godot-bin" \
+            -type f -name 'Godot' | head -n 1)"
 
           if [[ -z "$GODOT_BIN" ]]; then
-            echo "::error::找不到 Godot 可执行文件"
-            find "$RUNNER_TEMP/godot/unpacked" -maxdepth 5 -print
+            echo "::error::没有找到 Godot 可执行文件。"
             exit 1
           fi
 
           chmod +x "$GODOT_BIN"
           echo "GODOT_BIN=$GODOT_BIN" >> "$GITHUB_ENV"
-
           "$GODOT_BIN" --version
 
-      - name: Install iOS export templates
+      - name: Install Godot export templates
         shell: bash
         run: |
           set -euo pipefail
 
-          mkdir -p "$RUNNER_TEMP/templates"
+          TEMPLATE_DIR="$HOME/Library/Application Support/Godot/export_templates/4.3.stable"
+          mkdir -p "$TEMPLATE_DIR"
 
           curl -fL --retry 3 \
             "https://github.com/godotengine/godot/releases/download/4.3-stable/Godot_v4.3-stable_export_templates.tpz" \
-            -o "$RUNNER_TEMP/templates/templates.tpz"
+            -o "$RUNNER_TEMP/templates.tpz"
 
-          unzip -q "$RUNNER_TEMP/templates/templates.tpz" \
-            -d "$RUNNER_TEMP/templates/unpacked"
+          mkdir -p "$RUNNER_TEMP/templates"
+          unzip -oq "$RUNNER_TEMP/templates.tpz" -d "$RUNNER_TEMP/templates"
 
-          TEMPLATE_SOURCE="$RUNNER_TEMP/templates/unpacked/templates"
-          TEMPLATE_DEST="$HOME/Library/Application Support/Godot/export_templates/4.3.stable"
+          TEMPLATE_SOURCE="$(find "$RUNNER_TEMP/templates" \
+            -type f -name 'ios.zip' -print -quit || true)"
 
-          if [[ ! -d "$TEMPLATE_SOURCE" ]]; then
-            echo "::error::没有找到导出模板目录"
-            find "$RUNNER_TEMP/templates/unpacked" -maxdepth 3 -print
+          if [[ -z "$TEMPLATE_SOURCE" ]]; then
+            echo "::error::导出模板中没有找到 ios.zip。"
+            find "$RUNNER_TEMP/templates" -maxdepth 3 -type f | head -n 80
             exit 1
           fi
 
-          mkdir -p "$TEMPLATE_DEST"
-          cp -R "$TEMPLATE_SOURCE/." "$TEMPLATE_DEST/"
+          cp "$TEMPLATE_SOURCE" "$TEMPLATE_DIR/ios.zip"
+          echo "iOS 导出模板已安装。"
 
-          echo "导出模板已安装"
-          ls -la "$TEMPLATE_DEST"
+      - name: Generate fallback app icons
+        shell: bash
+        run: |
+          set -euo pipefail
 
-      - name: Fix iOS export preset
+          ICON_DIR="$RUNNER_TEMP/generated_icons"
+          mkdir -p "$ICON_DIR"
+
+          # 使用 Python 标准库生成有效的 1024x1024 PNG，
+          # 避免项目没有 PNG 图片时图标导出失败。
+          python3 - "$ICON_DIR/icon_1024.png" <<'PY'
+          import struct
+          import zlib
+          import sys
+
+          size = 1024
+          raw = b''.join(
+              b'\x00' + bytes([35, 75, 145, 255]) * size
+              for _ in range(size)
+          )
+
+          def chunk(kind, data):
+              return (
+                  struct.pack(">I", len(data)) + kind + data +
+                  struct.pack(">I", zlib.crc32(kind + data) & 0xffffffff)
+              )
+
+          png = (
+              b'\x89PNG\r\n\x1a\n'
+              + chunk(b'IHDR', struct.pack(">IIBBBBB", size, size, 8, 6, 0, 0, 0))
+              + chunk(b'IDAT', zlib.compress(raw))
+              + chunk(b'IEND', b'')
+          )
+
+          with open(sys.argv[1], "wb") as f:
+              f.write(png)
+          PY
+
+          for SIZE in 120 152 167 180; do
+            sips -s format png -z "$SIZE" "$SIZE" \
+              "$ICON_DIR/icon_1024.png" \
+              --out "$ICON_DIR/icon_${SIZE}.png" >/dev/null
+          done
+
+          echo "ICON_DIR=$ICON_DIR" >> "$GITHUB_ENV"
+          echo "备用 iOS 图标已生成。"
+
+      - name: Configure iOS export preset
         shell: bash
         run: |
           set -euo pipefail
@@ -139,36 +192,80 @@ jobs:
           PRESET_EOF
           fi
 
-          python3 - "$PRESET" <<'PY'
+          python3 - "$PRESET" "$ICON_DIR" <<'PY'
           import re
           import sys
           from pathlib import Path
 
-          path = Path(sys.argv[1])
-          content = path.read_text(encoding="utf-8")
+          preset = Path(sys.argv[1])
+          icon_dir = Path(sys.argv[2])
+          text = preset.read_text(encoding="utf-8")
 
-          team_id = 'application/app_store_team_id="ABCDE12345"'
+          if '[preset.0.options]' not in text:
+              raise SystemExit("找不到 [preset.0.options]，请检查 export_presets.cfg。")
 
-          if re.search(r'(?m)^\s*application/app_store_team_id\s*=', content):
-              content = re.sub(
-                  r'(?m)^\s*application/app_store_team_id\s*=.*$',
-                  team_id,
-                  content
-              )
-          else:
-              match = re.search(r'(?m)^\[preset\.0\.options\]\s*$', content)
-              if not match:
-                  raise SystemExit(
-                      "找不到 [preset.0.options]，无法自动添加 Team ID"
-                  )
-              pos = match.end()
-              content = content[:pos] + "\n" + team_id + content[pos:]
+          options = {
+              "icons/iphone_120x120": "120",
+              "icons/iphone_180x180": "180",
+              "icons/ipad_76x76": "120",
+              "icons/ipad_152x152": "152",
+              "icons/ipad_167x167": "167",
+              "icons/app_store_1024x1024": "1024",
+          }
 
-          path.write_text(content, encoding="utf-8")
-          print("已设置临时 Team ID 占位值")
+          # 只编辑第一个 iOS preset 的 options 段，
+          # 保留项目原有的其他配置。
+          sections = re.split(r'(?m)(?=^\[)', text)
+          found_options = False
+
+          for i, section in enumerate(sections):
+              if section.startswith("[preset.0.options]"):
+                  found_options = True
+                  for key, size in options.items():
+                      value = (icon_dir / f"icon_{size}.png").as_posix()
+                      line = f'{key}="{value}"'
+                      pattern = rf'(?m)^\s*{re.escape(key)}\s*=.*$'
+
+                      if re.search(pattern, section):
+                          section = re.sub(pattern, line, section)
+                      else:
+                          section = section.rstrip() + "\n" + line + "\n"
+
+                  sections[i] = section
+                  break
+
+          if not found_options:
+              raise SystemExit("没有找到 [preset.0.options]。")
+
+          text = "".join(sections)
+
+          # 如果项目原有预设没有这些基础设置，则补齐。
+          def set_main_option(content, key, value):
+              parts = re.split(r'(?m)(?=^\[)', content)
+              for i, part in enumerate(parts):
+                  if part.startswith("[preset.0]"):
+                      pattern = rf'(?m)^\s*{re.escape(key)}\s*=.*$'
+                      line = f'{key}="{value}"'
+                      if re.search(pattern, part):
+                          part = re.sub(pattern, line, part)
+                      else:
+                          part = part.rstrip() + "\n" + line + "\n"
+                      parts[i] = part
+                      return "".join(parts)
+              return content
+
+          text = set_main_option(
+              text, "application/app_store_team_id", "ABCDE12345"
+          )
+          text = set_main_option(
+              text, "application/bundle_identifier", "com.velocity.game"
+          )
+
+          preset.write_text(text, encoding="utf-8")
+          print("已设置 iOS 图标及基础导出配置。")
           PY
 
-          echo "当前导出预设："
+          echo "导出预设："
           cat "$PRESET"
 
       - name: Import Godot project
@@ -176,79 +273,108 @@ jobs:
         run: |
           set -euo pipefail
 
-          "$GODOT_BIN" \
-            --headless \
-            --editor \
-            --path "$PROJECT_DIR" \
-            --quit
+          "$GODOT_BIN" --headless --path "$PROJECT_DIR" --editor --import
 
-      - name: Export iOS project
+          echo "Godot 项目资源导入完成。"
+
+      - name: Export iOS Xcode project
         shell: bash
         run: |
           set -euo pipefail
 
-          EXPORT_DIR="$RUNNER_TEMP/godot_ios_export"
-          mkdir -p "$EXPORT_DIR"
+          mkdir -p "$GITHUB_WORKSPACE/build/ios"
 
-          "$GODOT_BIN" \
-            --headless \
+          "$GODOT_BIN" --headless \
             --path "$PROJECT_DIR" \
-            --export-release "iOS" \
-            "$EXPORT_DIR/Velocity.xcodeproj"
+            --export-debug "iOS" \
+            "$GITHUB_WORKSPACE/build/ios"
 
           echo "导出目录内容："
-          find "$EXPORT_DIR" -maxdepth 5 -print | head -n 200
-
-          XCODEPROJ="$(find "$EXPORT_DIR" -name '*.xcodeproj' -type d | head -n 1 || true)"
-
-          if [[ -z "$XCODEPROJ" ]]; then
-            echo "::error::Godot 没有生成 Xcode 工程，请检查上面的导出错误"
-            exit 1
-          fi
-
-          echo "XCODEPROJ=$XCODEPROJ" >> "$GITHUB_ENV"
+          find "$GITHUB_WORKSPACE/build/ios" -maxdepth 4 -print | head -n 200
 
       - name: Build unsigned iOS app
         shell: bash
         run: |
           set -euo pipefail
 
-          DERIVED="$RUNNER_TEMP/DerivedData"
+          XCODEPROJ="$(find "$GITHUB_WORKSPACE/build/ios" \
+            -type d -name '*.xcodeproj' -print -quit || true)"
+
+          if [[ -z "$XCODEPROJ" ]]; then
+            echo "::error::没有找到 Xcode 项目。请查看前面 Godot 导出步骤的日志。"
+            exit 1
+          fi
+
+          echo "Xcode 项目：$XCODEPROJ"
 
           xcodebuild \
             -project "$XCODEPROJ" \
+            -list
+
+          SCHEME="$(xcodebuild -list -json -project "$XCODEPROJ" \
+            | python3 -c '
+          import json,sys
+          data=json.load(sys.stdin)
+          project=data.get("project", {})
+          schemes=project.get("schemes", [])
+          print(schemes[0] if schemes else "")
+          ')"
+
+          if [[ -z "$SCHEME" ]]; then
+            echo "::error::无法自动识别 Xcode scheme。"
+            exit 1
+          fi
+
+          echo "使用 scheme：$SCHEME"
+
+          xcodebuild \
+            -project "$XCODEPROJ" \
+            -scheme "$SCHEME" \
             -configuration Release \
             -sdk iphoneos \
-            -derivedDataPath "$DERIVED" \
+            -derivedDataPath "$GITHUB_WORKSPACE/build/DerivedData" \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
             build
 
-          APP_PATH="$(find "$DERIVED/Build/Products/Release-iphoneos" -maxdepth 4 -name '*.app' -type d | head -n 1 || true)"
+          echo "Xcode 构建完成。"
+
+      - name: Package unsigned IPA
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APP_PATH="$(find "$GITHUB_WORKSPACE/build/DerivedData/Build/Products" \
+            -type d -name '*.app' \
+            -path '*iphoneos*' \
+            -print -quit || true)"
 
           if [[ -z "$APP_PATH" ]]; then
-            echo "::error::编译完成后没有找到 .app 文件"
-            find "$DERIVED/Build/Products" -maxdepth 5 -print || true
+            echo "::error::构建目录中没有找到 iOS .app。"
+            find "$GITHUB_WORKSPACE/build/DerivedData/Build/Products" \
+              -maxdepth 5 -print | head -n 200
             exit 1
           fi
 
-          mkdir -p "$RUNNER_TEMP/ipa/Payload"
-          cp -R "$APP_PATH" "$RUNNER_TEMP/ipa/Payload/"
+          echo "找到 App：$APP_PATH"
 
-          (
-            cd "$RUNNER_TEMP/ipa"
-            /usr/bin/zip -qry \
-              "$GITHUB_WORKSPACE/PROJECT-VELOCITY-unsigned.ipa" \
-              Payload
-          )
+          PACKAGE_DIR="$GITHUB_WORKSPACE/build/ipa/Payload"
+          mkdir -p "$PACKAGE_DIR"
+          ditto "$APP_PATH" "$PACKAGE_DIR/$(basename "$APP_PATH")"
 
-          ls -lh "$GITHUB_WORKSPACE/PROJECT-VELOCITY-unsigned.ipa"
+          cd "$GITHUB_WORKSPACE/build/ipa"
+          zip -qry "$GITHUB_WORKSPACE/unsigned-velocity.ipa" Payload
+
+          test -s "$GITHUB_WORKSPACE/unsigned-velocity.ipa"
+          echo "IPA 已生成：$GITHUB_WORKSPACE/unsigned-velocity.ipa"
+          ls -lh "$GITHUB_WORKSPACE/unsigned-velocity.ipa"
 
       - name: Upload unsigned IPA
+        if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: PROJECT-VELOCITY-unsigned-IPA
-          path: PROJECT-VELOCITY-unsigned.ipa
+          name: velocity-unsigned-ipa
+          path: unsigned-velocity.ipa
           if-no-files-found: error
           retention-days: 7
