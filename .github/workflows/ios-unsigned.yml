@@ -1,0 +1,218 @@
+
+name: Build unsigned iOS IPA
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build Godot iOS app
+    runs-on: macos-14
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Find and extract Godot project ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ZIP_FILE="$(find "$GITHUB_WORKSPACE" -maxdepth 3 -type f -iname '*.zip' ! -path '*/.git/*' | head -n 1)"
+
+          if [[ -z "$ZIP_FILE" ]]; then
+            echo "::error::没有找到项目 ZIP，请先把 velocity_godot_phase1(1).zip 上传到仓库。"
+            exit 1
+          fi
+
+          mkdir -p "$RUNNER_TEMP/project_src"
+          unzip -q "$ZIP_FILE" -d "$RUNNER_TEMP/project_src"
+
+          PROJECT_FILE="$(find "$RUNNER_TEMP/project_src" -name project.godot -type f | head -n 1)"
+
+          if [[ -z "$PROJECT_FILE" ]]; then
+            echo "::error::ZIP 内没有找到 project.godot。"
+            exit 1
+          fi
+
+          PROJECT_DIR="$(dirname "$PROJECT_FILE")"
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+
+          echo "项目目录：$PROJECT_DIR"
+          ls -la "$PROJECT_DIR"
+
+      - name: Install Godot 4.3
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p "$RUNNER_TEMP/godot"
+          curl -fL --retry 3 \
+            "https://github.com/godotengine/godot/releases/download/4.3-stable/Godot_v4.3-stable_macos.universal.zip" \
+            -o "$RUNNER_TEMP/godot/godot.zip"
+
+          unzip -q "$RUNNER_TEMP/godot/godot.zip" -d "$RUNNER_TEMP/godot/unpacked"
+
+          GODOT_BIN="$(find "$RUNNER_TEMP/godot/unpacked" -type f -name 'Godot*' | head -n 1)"
+
+          if [[ -z "$GODOT_BIN" ]]; then
+            echo "::error::找不到 Godot 可执行文件。"
+            exit 1
+          fi
+
+          chmod +x "$GODOT_BIN"
+          echo "GODOT_BIN=$GODOT_BIN" >> "$GITHUB_ENV"
+
+          "$GODOT_BIN" --version
+
+      - name: Install Godot iOS export templates
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p "$RUNNER_TEMP/templates"
+          curl -fL --retry 3 \
+            "https://github.com/godotengine/godot/releases/download/4.3-stable/Godot_v4.3-stable_export_templates.tpz" \
+            -o "$RUNNER_TEMP/templates/templates.tpz"
+
+          unzip -q "$RUNNER_TEMP/templates/templates.tpz" -d "$RUNNER_TEMP/templates/unpacked"
+
+          TEMPLATE_DIR="$HOME/Library/Application Support/Godot/export_templates/4.3.stable"
+          mkdir -p "$TEMPLATE_DIR"
+
+          if [[ -d "$RUNNER_TEMP/templates/unpacked/templates" ]]; then
+            cp -R "$RUNNER_TEMP/templates/unpacked/templates/." "$TEMPLATE_DIR/"
+          else
+            echo "::error::导出模板压缩包结构不符合预期。"
+            find "$RUNNER_TEMP/templates/unpacked" -maxdepth 3 -print
+            exit 1
+          fi
+
+          echo "Godot 导出模板已安装。"
+          ls -la "$TEMPLATE_DIR"
+
+      - name: Create iOS export preset
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PRESET="$PROJECT_DIR/export_presets.cfg"
+
+          if [[ ! -f "$PRESET" ]]; then
+            cat > "$PRESET" <<'PRESET_EOF'
+          [preset.0]
+
+          name="iOS"
+          platform="iOS"
+          runnable=true
+          dedicated_server=false
+          custom_features=""
+          export_filter="all_resources"
+          include_filter=""
+          exclude_filter=""
+          export_path=""
+          encryption_include_filters=""
+          encryption_exclude_filters=""
+          encrypt_pck=false
+          encrypt_directory=false
+          script_export_mode=2
+
+          [preset.0.options]
+
+          application/app_store_team_id=""
+          application/bundle_identifier="com.velocity.game"
+          application/signature=""
+          application/short_version="1.0"
+          application/version="1.0"
+          application/ minimum_ios_version="13.0"
+          architectures/arm64=true
+          architectures/simulator=false
+          PRESET_EOF
+
+            # 修正配置键，避免意外空格
+            sed -i '' 's#application/ minimum_ios_version#application/min_ios_version#' "$PRESET"
+          fi
+
+          echo "当前 iOS 导出预设："
+          cat "$PRESET"
+
+      - name: Import Godot project
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          "$GODOT_BIN" --headless --editor --path "$PROJECT_DIR" --quit
+
+      - name: Export iOS Xcode project
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          EXPORT_DIR="$RUNNER_TEMP/godot_ios_export"
+          mkdir -p "$EXPORT_DIR"
+
+          "$GODOT_BIN" \
+            --headless \
+            --path "$PROJECT_DIR" \
+            --export-release "iOS" \
+            "$EXPORT_DIR/Velocity.xcodeproj"
+
+          echo "导出目录内容："
+          find "$EXPORT_DIR" -maxdepth 4 -print | head -n 150
+
+          XCODEPROJ="$(find "$EXPORT_DIR" -name '*.xcodeproj' -type d | head -n 1 || true)"
+
+          if [[ -z "$XCODEPROJ" ]]; then
+            echo "::error::Godot 没有生成 Xcode 工程，请查看上面的导出日志。"
+            exit 1
+          fi
+
+          echo "XCODEPROJ=$XCODEPROJ" >> "$GITHUB_ENV"
+
+      - name: Build unsigned iOS app
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          DERIVED="$RUNNER_TEMP/DerivedData"
+
+          xcodebuild \
+            -project "$XCODEPROJ" \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath "$DERIVED" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build
+
+          APP_PATH="$(find "$DERIVED/Build/Products/Release-iphoneos" -maxdepth 3 -name '*.app' -type d | head -n 1 || true)"
+
+          if [[ -z "$APP_PATH" ]]; then
+            echo "::error::没有找到编译后的 .app 文件。"
+            find "$DERIVED/Build/Products" -maxdepth 5 -print || true
+            exit 1
+          fi
+
+          mkdir -p "$RUNNER_TEMP/ipa/Payload"
+          cp -R "$APP_PATH" "$RUNNER_TEMP/ipa/Payload/"
+
+          (
+            cd "$RUNNER_TEMP/ipa"
+            /usr/bin/zip -qry "$GITHUB_WORKSPACE/PROJECT-VELOCITY-unsigned.ipa" Payload
+          )
+
+          echo "生成的 IPA："
+          ls -lh "$GITHUB_WORKSPACE/PROJECT-VELOCITY-unsigned.ipa"
+
+      - name: Upload unsigned IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: PROJECT-VELOCITY-unsigned-IPA
+          path: PROJECT-VELOCITY-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 7
