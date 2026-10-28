@@ -31,7 +31,6 @@ jobs:
             exit 1
           fi
 
-          echo "项目压缩包：$ZIP_FILE"
           ditto -x -k "$ZIP_FILE" "$GITHUB_WORKSPACE/extracted"
 
           PROJECT_FILE="$(find "$GITHUB_WORKSPACE/extracted" -type f -name project.godot -not -path '*/.godot/*' | head -n 1 || true)"
@@ -83,13 +82,12 @@ jobs:
 
           TEMPLATE_SOURCE="$(find "$RUNNER_TEMP/templates" -type f -name ios.zip -print -quit || true)"
           if [[ -z "$TEMPLATE_SOURCE" ]]; then
-            echo "::error::导出模板中找不到 ios.zip。"
+            echo "::error::模板中没有找到 ios.zip。"
             find "$RUNNER_TEMP/templates" -maxdepth 4 -type f | head -n 80
             exit 1
           fi
 
           cp "$TEMPLATE_SOURCE" "$TEMPLATE_DIR/ios.zip"
-          echo "iOS 导出模板已安装。"
 
       - name: Generate fallback app icon
         shell: bash
@@ -101,7 +99,6 @@ jobs:
 
           python3 - "$ICON_DIR/icon.png" <<'PY'
           import struct, zlib, sys
-
           size = 1024
           row = b'\x00' + bytes([35, 75, 145, 255]) * size
           raw = row * size
@@ -116,19 +113,16 @@ jobs:
               + chunk(b'IDAT', zlib.compress(raw))
               + chunk(b'IEND', b'')
           )
-
           with open(sys.argv[1], "wb") as f:
               f.write(png)
           PY
 
           echo "ICON_DIR=$ICON_DIR" >> "$GITHUB_ENV"
-          file "$ICON_DIR/icon.png"
 
-      - name: Repair all iOS icon settings
+      - name: Repair iOS export preset icons
         shell: bash
         run: |
           set -euo pipefail
-
           PRESET="$PROJECT_DIR/export_presets.cfg"
 
           if [[ ! -f "$PRESET" ]]; then
@@ -167,16 +161,17 @@ jobs:
           import re, sys
           from pathlib import Path
 
-          preset = Path(sys.argv[1])
+          p = Path(sys.argv[1])
           icon = Path(sys.argv[2]).as_posix()
-          text = preset.read_text(encoding="utf-8")
+          text = p.read_text(encoding="utf-8")
 
           if "[preset.0.options]" not in text:
               raise SystemExit("找不到 [preset.0.options]。")
 
-          # Godot 4.3 的 iOS 导出预设可能包含多种图标：
-          # iPhone、iPad、Spotlight、Settings、Notification 和 App Store。
-          known_icons = [
+          sections = re.split(r'(?m)(?=^\[)', text)
+          found = False
+
+          keys = [
               "icons/iphone_120x120",
               "icons/iphone_180x180",
               "icons/ipad_76x76",
@@ -193,22 +188,16 @@ jobs:
               "icons/notification_60x60",
           ]
 
-          sections = re.split(r'(?m)(?=^\[)', text)
-          found = False
-
           for i, section in enumerate(sections):
               if section.startswith("[preset.0.options]"):
                   found = True
-
-                  # 所有已存在的图标项统一指向有效 PNG，
-                  # 包括原来值为空的 spotlight_40x40 等项目。
                   section = re.sub(
                       r'(?m)^(\s*icons/[^=]+\s*=\s*).*$',
                       lambda m: m.group(1).rstrip() + '="' + icon + '"',
                       section
                   )
 
-                  for key in known_icons:
+                  for key in keys:
                       pattern = rf'(?m)^\s*{re.escape(key)}\s*=.*$'
                       line = f'{key}="{icon}"'
                       if re.search(pattern, section):
@@ -224,9 +213,9 @@ jobs:
 
           text = "".join(sections)
 
-          # 修正占位团队 ID 和 Bundle ID。
-          def set_option(content, key, value):
-              parts = re.split(r'(?m)(?=^\[)', content)
+          def set_main(key, value):
+              global text
+              parts = re.split(r'(?m)(?=^\[)', text)
               for i, part in enumerate(parts):
                   if part.startswith("[preset.0]"):
                       pattern = rf'(?m)^\s*{re.escape(key)}\s*=.*$'
@@ -236,18 +225,13 @@ jobs:
                       else:
                           part = part.rstrip() + "\n" + line + "\n"
                       parts[i] = part
-                      return "".join(parts)
-              raise SystemExit("找不到 [preset.0]。")
+                      text = "".join(parts)
+                      return
 
-          text = set_option(text, "application/app_store_team_id", "ABCDE12345")
-          text = set_option(text, "application/bundle_identifier", "com.velocity.game")
-
-          preset.write_text(text, encoding="utf-8")
-
-          print("已配置的图标项：")
-          for line in text.splitlines():
-              if line.startswith("icons/"):
-                  print(line)
+          set_main("application/app_store_team_id", "ABCDE12345")
+          set_main("application/bundle_identifier", "com.velocity.game")
+          p.write_text(text, encoding="utf-8")
+          print("iOS 图标配置已更新。")
           PY
 
       - name: Import Godot project
@@ -256,33 +240,40 @@ jobs:
           set -euo pipefail
           "$GODOT_BIN" --headless --path "$PROJECT_DIR" --editor --import
 
-      - name: Export iOS Xcode project
+      - name: Export Xcode project (continue without archive)
         shell: bash
         run: |
-          set -euo pipefail
+          set -uo pipefail
 
           mkdir -p "$GITHUB_WORKSPACE/build/ios"
 
+          # Godot 4.3 的 iOS 导出可能会自动尝试归档并要求 Apple 账号。
+          # 即使最后归档失败，只要 Xcode 项目已生成，就继续手动无签名构建。
+          set +e
           "$GODOT_BIN" --headless \
             --path "$PROJECT_DIR" \
             --export-debug "iOS" \
             "$GITHUB_WORKSPACE/build/ios"
+          GODOT_STATUS=$?
+          set -e
 
-          echo "导出目录："
-          find "$GITHUB_WORKSPACE/build" -maxdepth 4 -print | head -n 200
+          XCODEPROJ="$(find "$GITHUB_WORKSPACE/build" -type d -name '*.xcodeproj' -print -quit || true)"
+
+          if [[ -z "$XCODEPROJ" ]]; then
+            echo "::error::Godot 导出后没有生成 Xcode 项目。"
+            echo "Godot exit code: $GODOT_STATUS"
+            exit 1
+          fi
+
+          echo "XCODEPROJ=$XCODEPROJ" >> "$GITHUB_ENV"
+          echo "已找到 Xcode 项目：$XCODEPROJ"
+          echo "Godot 导出命令退出码：$GODOT_STATUS"
+          echo "将继续尝试关闭签名构建。"
 
       - name: Build unsigned iOS app
         shell: bash
         run: |
           set -euo pipefail
-
-          XCODEPROJ="$(find "$GITHUB_WORKSPACE/build" -type d -name '*.xcodeproj' -print -quit || true)"
-          if [[ -z "$XCODEPROJ" ]]; then
-            echo "::error::没有找到 Xcode 项目，检查 Godot 导出日志。"
-            exit 1
-          fi
-
-          echo "Xcode 项目：$XCODEPROJ"
 
           SCHEME="$(xcodebuild -list -json -project "$XCODEPROJ" | python3 -c '
           import json,sys
@@ -295,7 +286,7 @@ jobs:
             exit 1
           fi
 
-          echo "Scheme：$SCHEME"
+          echo "使用 scheme：$SCHEME"
 
           xcodebuild \
             -project "$XCODEPROJ" \
@@ -317,7 +308,7 @@ jobs:
             -type d -name '*.app' -path '*iphoneos*' -print -quit || true)"
 
           if [[ -z "$APP_PATH" ]]; then
-            echo "::error::构建完成后没有找到 iOS .app。"
+            echo "::error::没有找到构建生成的 iOS .app。"
             find "$GITHUB_WORKSPACE/build/DerivedData/Build/Products" -maxdepth 5 -print | head -n 200
             exit 1
           fi
@@ -327,7 +318,6 @@ jobs:
 
           cd "$RUNNER_TEMP/ipa"
           zip -qry "$GITHUB_WORKSPACE/unsigned-velocity.ipa" Payload
-
           test -s "$GITHUB_WORKSPACE/unsigned-velocity.ipa"
           ls -lh "$GITHUB_WORKSPACE/unsigned-velocity.ipa"
 
