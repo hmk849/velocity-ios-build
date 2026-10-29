@@ -21,7 +21,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Find and extract Phase 3 Godot project
+      - name: Extract Phase 3 Godot project
         shell: bash
         run: |
           set -euo pipefail
@@ -29,28 +29,23 @@ jobs:
           ZIP_FILE="$GITHUB_WORKSPACE/velocity_godot_phase3.zip"
 
           if [[ ! -f "$ZIP_FILE" ]]; then
-            echo "::error::找不到仓库根目录中的 velocity_godot_phase3.zip"
-            echo "仓库中找到的 ZIP 文件："
-            find "$GITHUB_WORKSPACE" -maxdepth 3 \
-              -type f -iname '*.zip' \
-              ! -path '*/.git/*' -print
+            echo "::error::找不到 velocity_godot_phase3.zip，请确认它位于仓库根目录。"
+            find "$GITHUB_WORKSPACE" -maxdepth 3 -type f -iname '*.zip' -print
             exit 1
           fi
 
           rm -rf "$GITHUB_WORKSPACE/extracted"
           mkdir -p "$GITHUB_WORKSPACE/extracted"
-
           ditto -x -k "$ZIP_FILE" "$GITHUB_WORKSPACE/extracted"
 
           PROJECT_FILE="$(
             find "$GITHUB_WORKSPACE/extracted" \
               -type f -name project.godot \
-              -not -path '*/.godot/*' \
-              -print -quit
+              -not -path '*/.godot/*' -print -quit
           )"
 
           if [[ -z "$PROJECT_FILE" ]]; then
-            echo "::error::Phase 3 ZIP 中没有找到 project.godot"
+            echo "::error::ZIP 中没有找到 project.godot。"
             exit 1
           fi
 
@@ -79,13 +74,12 @@ jobs:
           )"
 
           if [[ -z "$GODOT_BIN" ]]; then
-            echo "::error::找不到 Godot 可执行文件"
+            echo "::error::找不到 Godot 可执行文件。"
             exit 1
           fi
 
           chmod +x "$GODOT_BIN"
           echo "GODOT_BIN=$GODOT_BIN" >> "$GITHUB_ENV"
-
           "$GODOT_BIN" --version
 
       - name: Install Godot iOS export template
@@ -110,14 +104,13 @@ jobs:
           )"
 
           if [[ -z "$TEMPLATE_SOURCE" ]]; then
-            echo "::error::Godot 导出模板中没有找到 ios.zip"
-            find "$RUNNER_TEMP/templates" \
-              -maxdepth 4 -type f | head -n 100
+            echo "::error::导出模板中没有找到 ios.zip。"
+            find "$RUNNER_TEMP/templates" -maxdepth 4 -type f | head -n 100
             exit 1
           fi
 
           cp "$TEMPLATE_SOURCE" "$TEMPLATE_DIR/ios.zip"
-          echo "已安装 iOS 导出模板"
+          echo "iOS 导出模板安装完成。"
 
       - name: Generate fallback app icon
         shell: bash
@@ -141,10 +134,7 @@ jobs:
                   struct.pack(">I", len(data))
                   + name
                   + data
-                  + struct.pack(
-                      ">I",
-                      zlib.crc32(name + data) & 0xffffffff
-                  )
+                  + struct.pack(">I", zlib.crc32(name + data) & 0xffffffff)
               )
 
           png = (
@@ -191,7 +181,7 @@ jobs:
 
           [preset.0.options]
 
-          application/app_store_team_id=""
+          application/app_store_team_id="ABCDE12345"
           application/bundle_identifier="com.velocity.game"
           application/signature=""
           application/short_version="1.0"
@@ -211,13 +201,22 @@ jobs:
           icon_path = Path(sys.argv[2]).as_posix()
           text = preset_path.read_text(encoding="utf-8")
 
-          if "[preset.0.options]" not in text:
-              raise SystemExit(
-                  "找不到 [preset.0.options]，无法配置 iOS 导出预设。"
-              )
-
           sections = re.split(r'(?m)(?=^\[)', text)
-          found = False
+
+          if not any(s.startswith("[preset.0]") for s in sections):
+              raise SystemExit("找不到 [preset.0]。")
+
+          if not any(s.startswith("[preset.0.options]") for s in sections):
+              raise SystemExit("找不到 [preset.0.options]。")
+
+          def set_key(section, key, value):
+              pattern = r'(?m)^\s*' + re.escape(key) + r'\s*=.*$'
+              line = f'{key}="{value}"'
+
+              if re.search(pattern, section):
+                  return re.sub(pattern, lambda _: line, section)
+
+              return section.rstrip() + "\n" + line + "\n"
 
           icon_keys = [
               "icons/iphone_120x120",
@@ -236,50 +235,31 @@ jobs:
               "icons/notification_60x60",
           ]
 
-          def set_key(section, key, value):
-              pattern = (
-                  r'(?m)^\s*'
-                  + re.escape(key)
-                  + r'\s*=.*$'
-              )
-              line = f'{key}="{value}"'
-
-              if re.search(pattern, section):
-                  return re.sub(pattern, line, section)
-
-              return section.rstrip() + "\n" + line + "\n"
-
           for i, section in enumerate(sections):
-              if section.startswith("[preset.0.options]"):
-                  found = True
-
+              if section.startswith("[preset.0]"):
                   section = set_key(
-                      section,
-                      "application/bundle_identifier",
-                      "com.velocity.game"
+                      section, "application/app_store_team_id", "ABCDE12345"
                   )
-
                   section = set_key(
-                      section,
-                      "application/app_store_team_id",
-                      ""
+                      section, "application/bundle_identifier", "com.velocity.game"
+                  )
+                  sections[i] = section
+
+              elif section.startswith("[preset.0.options]"):
+                  section = set_key(
+                      section, "application/app_store_team_id", "ABCDE12345"
+                  )
+                  section = set_key(
+                      section, "application/bundle_identifier", "com.velocity.game"
                   )
 
                   for key in icon_keys:
                       section = set_key(section, key, icon_path)
 
                   sections[i] = section
-                  break
 
-          if not found:
-              raise SystemExit("无法找到 iOS 导出选项区。")
-
-          preset_path.write_text(
-              "".join(sections),
-              encoding="utf-8"
-          )
-
-          print("已配置 iOS bundle identifier 和备用图标。")
+          preset_path.write_text("".join(sections), encoding="utf-8")
+          print("已配置占位 Team ID、Bundle ID 和图标。")
           PY
 
       - name: Import Godot project
@@ -317,15 +297,15 @@ jobs:
           )"
 
           if [[ -z "$XCODEPROJ" ]]; then
-            echo "::error::没有生成 Xcode 项目。"
+            echo "::error::Godot 没有生成 Xcode 项目。"
             echo "Godot 导出退出码：$GODOT_STATUS"
             exit 1
           fi
 
           echo "XCODEPROJ=$XCODEPROJ" >> "$GITHUB_ENV"
-          echo "已找到 Xcode 项目：$XCODEPROJ"
+          echo "找到 Xcode 项目：$XCODEPROJ"
           echo "Godot 导出退出码：$GODOT_STATUS"
-          echo "将继续尝试无签名构建。"
+          echo "继续尝试关闭签名构建。"
 
       - name: Build unsigned iOS app
         shell: bash
@@ -371,10 +351,8 @@ jobs:
 
           APP_PATH="$(
             find "$PRODUCTS" \
-              -type d \
-              -name '*.app' \
-              -path '*iphoneos*' \
-              -print -quit
+              -type d -name '*.app' \
+              -path '*iphoneos*' -print -quit
           )"
 
           if [[ -z "$APP_PATH" ]]; then
@@ -393,11 +371,10 @@ jobs:
           zip -qry "$GITHUB_WORKSPACE/unsigned-velocity.ipa" Payload
 
           if [[ ! -s "$GITHUB_WORKSPACE/unsigned-velocity.ipa" ]]; then
-            echo "::error::IPA 文件没有成功生成。"
+            echo "::error::IPA 文件生成失败。"
             exit 1
           fi
 
-          echo "IPA 构建完成："
           ls -lh "$GITHUB_WORKSPACE/unsigned-velocity.ipa"
 
       - name: Upload unsigned IPA
