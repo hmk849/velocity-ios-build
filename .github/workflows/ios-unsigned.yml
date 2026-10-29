@@ -4,7 +4,8 @@ on:
   workflow_dispatch:
   push:
     paths:
-      - "**.zip"
+      - "*.zip"
+      - "**/*.zip"
       - ".github/workflows/ios-unsigned.yml"
 
 permissions:
@@ -12,6 +13,7 @@ permissions:
 
 jobs:
   build:
+    name: Build Phase 3 Unsigned IPA
     runs-on: macos-14
     timeout-minutes: 60
 
@@ -19,29 +21,44 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Find and extract Godot project ZIP
+      - name: Find and extract Phase 3 Godot project
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "$GITHUB_WORKSPACE/extracted"
 
-          ZIP_FILE="$(find "$GITHUB_WORKSPACE" -maxdepth 3 -type f -iname '*.zip' ! -path '*/extracted/*' | head -n 1 || true)"
-          if [[ -z "$ZIP_FILE" ]]; then
-            echo "::error::仓库中没有找到项目 ZIP。"
+          ZIP_FILE="$GITHUB_WORKSPACE/velocity_godot_phase3.zip"
+
+          if [[ ! -f "$ZIP_FILE" ]]; then
+            echo "::error::找不到仓库根目录中的 velocity_godot_phase3.zip"
+            echo "仓库中找到的 ZIP 文件："
+            find "$GITHUB_WORKSPACE" -maxdepth 3 \
+              -type f -iname '*.zip' \
+              ! -path '*/.git/*' -print
             exit 1
           fi
 
+          rm -rf "$GITHUB_WORKSPACE/extracted"
+          mkdir -p "$GITHUB_WORKSPACE/extracted"
+
           ditto -x -k "$ZIP_FILE" "$GITHUB_WORKSPACE/extracted"
 
-          PROJECT_FILE="$(find "$GITHUB_WORKSPACE/extracted" -type f -name project.godot -not -path '*/.godot/*' | head -n 1 || true)"
+          PROJECT_FILE="$(
+            find "$GITHUB_WORKSPACE/extracted" \
+              -type f -name project.godot \
+              -not -path '*/.godot/*' \
+              -print -quit
+          )"
+
           if [[ -z "$PROJECT_FILE" ]]; then
-            echo "::error::ZIP 中没有找到 project.godot。"
+            echo "::error::Phase 3 ZIP 中没有找到 project.godot"
             exit 1
           fi
 
           PROJECT_DIR="$(dirname "$PROJECT_FILE")"
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
-          echo "Godot 项目目录：$PROJECT_DIR"
+
+          echo "使用源码：$ZIP_FILE"
+          echo "项目目录：$PROJECT_DIR"
 
       - name: Install Godot 4.3
         shell: bash
@@ -53,19 +70,25 @@ jobs:
             -o "$RUNNER_TEMP/godot.zip"
 
           mkdir -p "$RUNNER_TEMP/godot-bin"
-          unzip -oq "$RUNNER_TEMP/godot.zip" -d "$RUNNER_TEMP/godot-bin"
+          unzip -oq "$RUNNER_TEMP/godot.zip" \
+            -d "$RUNNER_TEMP/godot-bin"
 
-          GODOT_BIN="$(find "$RUNNER_TEMP/godot-bin" -type f -name Godot -print -quit)"
+          GODOT_BIN="$(
+            find "$RUNNER_TEMP/godot-bin" \
+              -type f -name Godot -print -quit
+          )"
+
           if [[ -z "$GODOT_BIN" ]]; then
-            echo "::error::找不到 Godot 可执行文件。"
+            echo "::error::找不到 Godot 可执行文件"
             exit 1
           fi
 
           chmod +x "$GODOT_BIN"
           echo "GODOT_BIN=$GODOT_BIN" >> "$GITHUB_ENV"
+
           "$GODOT_BIN" --version
 
-      - name: Install Godot export templates
+      - name: Install Godot iOS export template
         shell: bash
         run: |
           set -euo pipefail
@@ -78,16 +101,23 @@ jobs:
             -o "$RUNNER_TEMP/templates.tpz"
 
           mkdir -p "$RUNNER_TEMP/templates"
-          unzip -oq "$RUNNER_TEMP/templates.tpz" -d "$RUNNER_TEMP/templates"
+          unzip -oq "$RUNNER_TEMP/templates.tpz" \
+            -d "$RUNNER_TEMP/templates"
 
-          TEMPLATE_SOURCE="$(find "$RUNNER_TEMP/templates" -type f -name ios.zip -print -quit || true)"
+          TEMPLATE_SOURCE="$(
+            find "$RUNNER_TEMP/templates" \
+              -type f -name ios.zip -print -quit
+          )"
+
           if [[ -z "$TEMPLATE_SOURCE" ]]; then
-            echo "::error::模板中没有找到 ios.zip。"
-            find "$RUNNER_TEMP/templates" -maxdepth 4 -type f | head -n 80
+            echo "::error::Godot 导出模板中没有找到 ios.zip"
+            find "$RUNNER_TEMP/templates" \
+              -maxdepth 4 -type f | head -n 100
             exit 1
           fi
 
           cp "$TEMPLATE_SOURCE" "$TEMPLATE_DIR/ios.zip"
+          echo "已安装 iOS 导出模板"
 
       - name: Generate fallback app icon
         shell: bash
@@ -98,31 +128,46 @@ jobs:
           mkdir -p "$ICON_DIR"
 
           python3 - "$ICON_DIR/icon.png" <<'PY'
-          import struct, zlib, sys
+          import struct
+          import zlib
+          import sys
+
           size = 1024
           row = b'\x00' + bytes([35, 75, 145, 255]) * size
           raw = row * size
 
           def chunk(name, data):
-              return (struct.pack(">I", len(data)) + name + data
-                      + struct.pack(">I", zlib.crc32(name + data) & 0xffffffff))
+              return (
+                  struct.pack(">I", len(data))
+                  + name
+                  + data
+                  + struct.pack(
+                      ">I",
+                      zlib.crc32(name + data) & 0xffffffff
+                  )
+              )
 
           png = (
               b'\x89PNG\r\n\x1a\n'
-              + chunk(b'IHDR', struct.pack(">IIBBBBB", size, size, 8, 6, 0, 0, 0))
+              + chunk(
+                  b'IHDR',
+                  struct.pack(">IIBBBBB", size, size, 8, 6, 0, 0, 0)
+              )
               + chunk(b'IDAT', zlib.compress(raw))
               + chunk(b'IEND', b'')
           )
+
           with open(sys.argv[1], "wb") as f:
               f.write(png)
           PY
 
           echo "ICON_DIR=$ICON_DIR" >> "$GITHUB_ENV"
 
-      - name: Repair iOS export preset icons
+      - name: Configure iOS export preset
         shell: bash
         run: |
           set -euo pipefail
+
           PRESET="$PROJECT_DIR/export_presets.cfg"
 
           if [[ ! -f "$PRESET" ]]; then
@@ -146,7 +191,7 @@ jobs:
 
           [preset.0.options]
 
-          application/app_store_team_id="ABCDE12345"
+          application/app_store_team_id=""
           application/bundle_identifier="com.velocity.game"
           application/signature=""
           application/short_version="1.0"
@@ -158,20 +203,23 @@ jobs:
           fi
 
           python3 - "$PRESET" "$ICON_DIR/icon.png" <<'PY'
-          import re, sys
+          import re
+          import sys
           from pathlib import Path
 
-          p = Path(sys.argv[1])
-          icon = Path(sys.argv[2]).as_posix()
-          text = p.read_text(encoding="utf-8")
+          preset_path = Path(sys.argv[1])
+          icon_path = Path(sys.argv[2]).as_posix()
+          text = preset_path.read_text(encoding="utf-8")
 
           if "[preset.0.options]" not in text:
-              raise SystemExit("找不到 [preset.0.options]。")
+              raise SystemExit(
+                  "找不到 [preset.0.options]，无法配置 iOS 导出预设。"
+              )
 
           sections = re.split(r'(?m)(?=^\[)', text)
           found = False
 
-          keys = [
+          icon_keys = [
               "icons/iphone_120x120",
               "icons/iphone_180x180",
               "icons/ipad_76x76",
@@ -188,101 +236,115 @@ jobs:
               "icons/notification_60x60",
           ]
 
+          def set_key(section, key, value):
+              pattern = (
+                  r'(?m)^\s*'
+                  + re.escape(key)
+                  + r'\s*=.*$'
+              )
+              line = f'{key}="{value}"'
+
+              if re.search(pattern, section):
+                  return re.sub(pattern, line, section)
+
+              return section.rstrip() + "\n" + line + "\n"
+
           for i, section in enumerate(sections):
               if section.startswith("[preset.0.options]"):
                   found = True
-                  section = re.sub(
-                      r'(?m)^(\s*icons/[^=]+\s*=\s*).*$',
-                      lambda m: m.group(1).rstrip() + '="' + icon + '"',
-                      section
+
+                  section = set_key(
+                      section,
+                      "application/bundle_identifier",
+                      "com.velocity.game"
                   )
 
-                  for key in keys:
-                      pattern = rf'(?m)^\s*{re.escape(key)}\s*=.*$'
-                      line = f'{key}="{icon}"'
-                      if re.search(pattern, section):
-                          section = re.sub(pattern, line, section)
-                      else:
-                          section = section.rstrip() + "\n" + line + "\n"
+                  section = set_key(
+                      section,
+                      "application/app_store_team_id",
+                      ""
+                  )
+
+                  for key in icon_keys:
+                      section = set_key(section, key, icon_path)
 
                   sections[i] = section
                   break
 
           if not found:
-              raise SystemExit("没有找到 [preset.0.options]。")
+              raise SystemExit("无法找到 iOS 导出选项区。")
 
-          text = "".join(sections)
+          preset_path.write_text(
+              "".join(sections),
+              encoding="utf-8"
+          )
 
-          def set_main(key, value):
-              global text
-              parts = re.split(r'(?m)(?=^\[)', text)
-              for i, part in enumerate(parts):
-                  if part.startswith("[preset.0]"):
-                      pattern = rf'(?m)^\s*{re.escape(key)}\s*=.*$'
-                      line = f'{key}="{value}"'
-                      if re.search(pattern, part):
-                          part = re.sub(pattern, line, part)
-                      else:
-                          part = part.rstrip() + "\n" + line + "\n"
-                      parts[i] = part
-                      text = "".join(parts)
-                      return
-
-          set_main("application/app_store_team_id", "ABCDE12345")
-          set_main("application/bundle_identifier", "com.velocity.game")
-          p.write_text(text, encoding="utf-8")
-          print("iOS 图标配置已更新。")
+          print("已配置 iOS bundle identifier 和备用图标。")
           PY
 
       - name: Import Godot project
         shell: bash
         run: |
           set -euo pipefail
-          "$GODOT_BIN" --headless --path "$PROJECT_DIR" --editor --import
 
-      - name: Export Xcode project (continue without archive)
+          "$GODOT_BIN" \
+            --headless \
+            --path "$PROJECT_DIR" \
+            --editor \
+            --import
+
+      - name: Generate Xcode project
         shell: bash
         run: |
           set -uo pipefail
 
           mkdir -p "$GITHUB_WORKSPACE/build/ios"
 
-          # Godot 4.3 的 iOS 导出可能会自动尝试归档并要求 Apple 账号。
-          # 即使最后归档失败，只要 Xcode 项目已生成，就继续手动无签名构建。
           set +e
-          "$GODOT_BIN" --headless \
+          "$GODOT_BIN" \
+            --headless \
             --path "$PROJECT_DIR" \
-            --export-debug "iOS" \
+            --export-debug \
+            "iOS" \
             "$GITHUB_WORKSPACE/build/ios"
+
           GODOT_STATUS=$?
           set -e
 
-          XCODEPROJ="$(find "$GITHUB_WORKSPACE/build" -type d -name '*.xcodeproj' -print -quit || true)"
+          XCODEPROJ="$(
+            find "$GITHUB_WORKSPACE/build" \
+              -type d -name '*.xcodeproj' -print -quit
+          )"
 
           if [[ -z "$XCODEPROJ" ]]; then
-            echo "::error::Godot 导出后没有生成 Xcode 项目。"
-            echo "Godot exit code: $GODOT_STATUS"
+            echo "::error::没有生成 Xcode 项目。"
+            echo "Godot 导出退出码：$GODOT_STATUS"
             exit 1
           fi
 
           echo "XCODEPROJ=$XCODEPROJ" >> "$GITHUB_ENV"
           echo "已找到 Xcode 项目：$XCODEPROJ"
-          echo "Godot 导出命令退出码：$GODOT_STATUS"
-          echo "将继续尝试关闭签名构建。"
+          echo "Godot 导出退出码：$GODOT_STATUS"
+          echo "将继续尝试无签名构建。"
 
       - name: Build unsigned iOS app
         shell: bash
         run: |
           set -euo pipefail
 
-          SCHEME="$(xcodebuild -list -json -project "$XCODEPROJ" | python3 -c '
-          import json,sys
-          d=json.load(sys.stdin)
-          print((d.get("project",{}).get("schemes") or [""])[0])
-          ')"
+          SCHEME="$(
+            xcodebuild -list -json -project "$XCODEPROJ" |
+            python3 -c '
+          import json, sys
+          data = json.load(sys.stdin)
+          schemes = data.get("project", {}).get("schemes", [])
+          print(schemes[0] if schemes else "")
+          '
+          )"
 
           if [[ -z "$SCHEME" ]]; then
             echo "::error::无法识别 Xcode scheme。"
+            xcodebuild -list -project "$XCODEPROJ"
             exit 1
           fi
 
@@ -293,6 +355,7 @@ jobs:
             -scheme "$SCHEME" \
             -configuration Release \
             -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
             -derivedDataPath "$GITHUB_WORKSPACE/build/DerivedData" \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
@@ -304,28 +367,44 @@ jobs:
         run: |
           set -euo pipefail
 
-          APP_PATH="$(find "$GITHUB_WORKSPACE/build/DerivedData/Build/Products" \
-            -type d -name '*.app' -path '*iphoneos*' -print -quit || true)"
+          PRODUCTS="$GITHUB_WORKSPACE/build/DerivedData/Build/Products"
+
+          APP_PATH="$(
+            find "$PRODUCTS" \
+              -type d \
+              -name '*.app' \
+              -path '*iphoneos*' \
+              -print -quit
+          )"
 
           if [[ -z "$APP_PATH" ]]; then
-            echo "::error::没有找到构建生成的 iOS .app。"
-            find "$GITHUB_WORKSPACE/build/DerivedData/Build/Products" -maxdepth 5 -print | head -n 200
+            echo "::error::没有找到 iOS .app 构建产物。"
+            find "$PRODUCTS" -maxdepth 6 -print | head -n 200
             exit 1
           fi
 
-          mkdir -p "$RUNNER_TEMP/ipa/Payload"
-          ditto "$APP_PATH" "$RUNNER_TEMP/ipa/Payload/$(basename "$APP_PATH")"
+          IPA_DIR="$RUNNER_TEMP/ipa"
+          rm -rf "$IPA_DIR"
+          mkdir -p "$IPA_DIR/Payload"
 
-          cd "$RUNNER_TEMP/ipa"
+          ditto "$APP_PATH" "$IPA_DIR/Payload/$(basename "$APP_PATH")"
+
+          cd "$IPA_DIR"
           zip -qry "$GITHUB_WORKSPACE/unsigned-velocity.ipa" Payload
-          test -s "$GITHUB_WORKSPACE/unsigned-velocity.ipa"
+
+          if [[ ! -s "$GITHUB_WORKSPACE/unsigned-velocity.ipa" ]]; then
+            echo "::error::IPA 文件没有成功生成。"
+            exit 1
+          fi
+
+          echo "IPA 构建完成："
           ls -lh "$GITHUB_WORKSPACE/unsigned-velocity.ipa"
 
       - name: Upload unsigned IPA
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: velocity-unsigned-ipa
+          name: velocity-phase3-unsigned-ipa
           path: unsigned-velocity.ipa
           if-no-files-found: error
           retention-days: 7
