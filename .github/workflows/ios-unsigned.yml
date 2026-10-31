@@ -13,7 +13,7 @@ permissions:
 
 jobs:
   build:
-    name: Build Phase 3 Unsigned IPA
+    name: Build Phase 6 Unsigned IPA
     runs-on: macos-14
     timeout-minutes: 60
 
@@ -26,10 +26,10 @@ jobs:
         run: |
           set -euo pipefail
 
-          ZIP_FILE="$GITHUB_WORKSPACE/velocity_godot_phase3.zip"
+          ZIP_FILE="$GITHUB_WORKSPACE/velocity_godot_phase6.zip"
 
           if [[ ! -f "$ZIP_FILE" ]]; then
-            echo "::error::找不到 velocity_godot_phase3.zip，请确认它位于仓库根目录。"
+            echo "::error::找不到 velocity_godot_phase6.zip，请确认它位于仓库根目录。"
             find "$GITHUB_WORKSPACE" -maxdepth 3 -type f -iname '*.zip' -print
             exit 1
           fi
@@ -181,7 +181,7 @@ jobs:
 
           [preset.0.options]
 
-          application/app_store_team_id="ABCDE12345"
+          application/app_store_team_id=""
           application/bundle_identifier="com.velocity.game"
           application/signature=""
           application/short_version="1.0"
@@ -238,7 +238,7 @@ jobs:
           for i, section in enumerate(sections):
               if section.startswith("[preset.0]"):
                   section = set_key(
-                      section, "application/app_store_team_id", "ABCDE12345"
+                      section, "application/app_store_team_id", ""
                   )
                   section = set_key(
                       section, "application/bundle_identifier", "com.velocity.game"
@@ -247,7 +247,7 @@ jobs:
 
               elif section.startswith("[preset.0.options]"):
                   section = set_key(
-                      section, "application/app_store_team_id", "ABCDE12345"
+                      section, "application/app_store_team_id", ""
                   )
                   section = set_key(
                       section, "application/bundle_identifier", "com.velocity.game"
@@ -381,7 +381,7 @@ jobs:
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: velocity-phase3-unsigned-ipa
+          name: velocity-phase6-unsigned-ipa
           path: unsigned-velocity.ipa
           if-no-files-found: error
           retention-days: 7
