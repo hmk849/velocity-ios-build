@@ -213,7 +213,7 @@ jobs:
           if not sep:
               raise SystemExit("Missing [preset.0.options]")
           for key in keys:
-              tail += f'{key}="{icon}"\\n'
+              tail += f'{key}="{icon}"\n'
           p.write_text(head + marker + tail, encoding="utf-8")
           print("iOS preset written; Team ID:", "ABCDE12345")
           print(p.read_text(encoding="utf-8"))
@@ -262,7 +262,10 @@ jobs:
           echo "XCODEPROJ=$XCODEPROJ" >> "$GITHUB_ENV"
           echo "找到 Xcode 项目：$XCODEPROJ"
           echo "Godot 导出退出码：$GODOT_STATUS"
-          echo "继续尝试关闭签名构建。"
+          if [[ "$GODOT_STATUS" -ne 0 ]]; then
+            echo "::error::Godot iOS 导出失败，停止后续 Xcode 构建。"
+            exit "$GODOT_STATUS"
+          fi
 
       - name: Build unsigned iOS app
         shell: bash
