@@ -160,8 +160,9 @@ jobs:
 
           PRESET="$PROJECT_DIR/export_presets.cfg"
 
-          if [[ ! -f "$PRESET" ]]; then
-            cat > "$PRESET" <<'PRESET_EOF'
+          # Rebuild the iOS preset from scratch. The Team ID belongs in
+          # [preset.0.options], not in [preset.0].
+          cat > "$PRESET" <<'PRESET_EOF'
           [preset.0]
 
           name="iOS"
@@ -190,76 +191,32 @@ jobs:
           architectures/arm64=true
           architectures/simulator=false
           PRESET_EOF
-          fi
 
           python3 - "$PRESET" "$ICON_DIR/icon.png" <<'PY'
-          import re
           import sys
           from pathlib import Path
 
-          preset_path = Path(sys.argv[1])
-          icon_path = Path(sys.argv[2]).as_posix()
-          text = preset_path.read_text(encoding="utf-8")
-
-          sections = re.split(r'(?m)(?=^\[)', text)
-
-          if not any(s.startswith("[preset.0]") for s in sections):
-              raise SystemExit("找不到 [preset.0]。")
-
-          if not any(s.startswith("[preset.0.options]") for s in sections):
-              raise SystemExit("找不到 [preset.0.options]。")
-
-          def set_key(section, key, value):
-              pattern = r'(?m)^\s*' + re.escape(key) + r'\s*=.*$'
-              line = f'{key}="{value}"'
-
-              if re.search(pattern, section):
-                  return re.sub(pattern, lambda _: line, section)
-
-              return section.rstrip() + "\n" + line + "\n"
-
-          icon_keys = [
-              "icons/iphone_120x120",
-              "icons/iphone_180x180",
-              "icons/ipad_76x76",
-              "icons/ipad_152x152",
-              "icons/ipad_167x167",
-              "icons/app_store_1024x1024",
-              "icons/spotlight_40x40",
-              "icons/spotlight_80x80",
-              "icons/settings_29x29",
-              "icons/settings_58x58",
-              "icons/settings_87x87",
-              "icons/notification_20x20",
-              "icons/notification_40x40",
-              "icons/notification_60x60",
+          p = Path(sys.argv[1])
+          icon = Path(sys.argv[2]).as_posix()
+          s = p.read_text(encoding="utf-8")
+          keys = [
+              "icons/iphone_120x120", "icons/iphone_180x180",
+              "icons/ipad_76x76", "icons/ipad_152x152",
+              "icons/ipad_167x167", "icons/app_store_1024x1024",
+              "icons/spotlight_40x40", "icons/spotlight_80x80",
+              "icons/settings_29x29", "icons/settings_58x58",
+              "icons/settings_87x87", "icons/notification_20x20",
+              "icons/notification_40x40", "icons/notification_60x60",
           ]
-
-          for i, section in enumerate(sections):
-              if section.startswith("[preset.0]"):
-                  section = set_key(
-                      section, "application/app_store_team_id", ""
-                  )
-                  section = set_key(
-                      section, "application/bundle_identifier", "com.velocity.game"
-                  )
-                  sections[i] = section
-
-              elif section.startswith("[preset.0.options]"):
-                  section = set_key(
-                      section, "application/app_store_team_id", ""
-                  )
-                  section = set_key(
-                      section, "application/bundle_identifier", "com.velocity.game"
-                  )
-
-                  for key in icon_keys:
-                      section = set_key(section, key, icon_path)
-
-                  sections[i] = section
-
-          preset_path.write_text("".join(sections), encoding="utf-8")
-          print("已配置构建占位 Team ID（仅用于生成 Xcode 项目，不用于签名）、Bundle ID 和图标。")
+          marker = "[preset.0.options]"
+          head, sep, tail = s.partition(marker)
+          if not sep:
+              raise SystemExit("Missing [preset.0.options]")
+          for key in keys:
+              tail += f'{key}="{icon}"\\n'
+          p.write_text(head + marker + tail, encoding="utf-8")
+          print("iOS preset written; Team ID:", "ABCDE12345")
+          print(p.read_text(encoding="utf-8"))
           PY
 
       - name: Import Godot project
