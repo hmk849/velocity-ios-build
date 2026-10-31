@@ -181,7 +181,7 @@ jobs:
 
           [preset.0.options]
 
-          application/app_store_team_id=""
+          application/app_store_team_id="ABCDE12345"
           application/bundle_identifier="com.velocity.game"
           application/signature=""
           application/short_version="1.0"
@@ -259,7 +259,7 @@ jobs:
                   sections[i] = section
 
           preset_path.write_text("".join(sections), encoding="utf-8")
-          print("已配置占位 Team ID、Bundle ID 和图标。")
+          print("已配置构建占位 Team ID（仅用于生成 Xcode 项目，不用于签名）、Bundle ID 和图标。")
           PY
 
       - name: Import Godot project
